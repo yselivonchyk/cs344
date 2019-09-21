@@ -1,23 +1,3 @@
-// Homework 2
-// Image Blurring
-//
-// In this homework we are blurring an image. To do this, imagine that we have
-// a square array of weight values. For each pixel in the image, imagine that we
-// overlay this square array of weights on top of the image such that the center
-// of the weight array is aligned with the current pixel. To compute a blurred
-// pixel value, we multiply each pair of numbers that line up. In other words, we
-// multiply each weight with the pixel underneath it. Finally, we add up all of the
-// multiplied numbers and assign that value to our output for the current pixel.
-// We repeat this process for all the pixels in the image.
-
-// To help get you started, we have included some useful notes here.
-
-//****************************************************************************
-
-// For a color image that has multiple channels, we suggest separating
-// the different color channels so that each color is stored contiguously
-// instead of being interleaved. This will simplify your code.
-
 // That is instead of RGBARGBARGBARGBA... we suggest transforming to three
 // arrays (as in the previous homework we ignore the alpha channel again):
 //  1) RRRRRRRR...
@@ -108,31 +88,32 @@ void gaussian_blur(const unsigned char* const inputChannel,
                    int numRows, int numCols,
                    const float* const filter, const int filterWidth)
 {
-  // TODO
-  
-  // NOTE: Be sure to compute any intermediate results in floating point
-  // before storing the final result as unsigned char.
+  float res = 0.0;
 
-  // NOTE: Be careful not to try to access memory that is outside the bounds of
-  // the image. You'll want code that performs the following check before accessing
-  // GPU memory:
-  //
-  // if ( absolute_image_position_x >= numCols ||
-  //      absolute_image_position_y >= numRows )
-  // {
-  //     return;
-  // }
-  
-  // NOTE: If a thread's absolute position 2D position is within the image, but some of
-  // its neighbors are outside the image, then you will need to be extra careful. Instead
-  // of trying to read such a neighbor value from GPU memory (which won't work because
-  // the value is out of bounds), you should explicitly clamp the neighbor values you read
-  // to be within the bounds of the image. If this is not clear to you, then please refer
-  // to sequential reference solution for the exact clamping semantics you should follow.
+  int px = threadIdx.x + blockIdx.x*blockDim.x;
+  int py = threadIdx.y + blockIdx.y*blockDim.y;
+  int ps = py+px*numRows;
+
+  if (px >= numCols || py >=  numRows)
+    return;
+
+  for (int i = 0; i < filterWidth; i++)
+    for(int j = 0; j < filterWidth; j++)
+    {
+      int fx = px - filterWidth/2 + i;
+      int fy = py - filterWidth/2 + j;
+      fx = (0 <= fx)      ? fx : 0;
+      fx = (fx < numCols) ? fx : numCols;
+      fy = (0 < fy)       ? fy : 0;
+      fy = (fy < numRows) ? fy : numRows;
+
+      int pf = px+py*numCols;
+      res += inputChannel[pf];
+    }
+  outputChannel[ps] = inputChannel[ps];
 }
 
-//This kernel takes in an image represented as a uchar4 and splits
-//it into three images consisting of only one color channel each
+
 __global__
 void separateChannels(const uchar4* const inputImageRGBA,
                       int numRows,
@@ -141,22 +122,18 @@ void separateChannels(const uchar4* const inputImageRGBA,
                       unsigned char* const greenChannel,
                       unsigned char* const blueChannel)
 {
-  // TODO
-  //
-  // NOTE: Be careful not to try to access memory that is outside the bounds of
-  // the image. You'll want code that performs the following check before accessing
-  // GPU memory:
-  //
-  // if ( absolute_image_position_x >= numCols ||
-  //      absolute_image_position_y >= numRows )
-  // {
-  //     return;
-  // }
+  int px = threadIdx.x + blockIdx.x*blockDim.x;
+  int py = threadIdx.y + blockIdx.y*blockDim.y;
+  int ps = py+px*numRows;
+
+  if (px >= numCols || py >=  numRows)
+    return;
+
+  redChannel[ps]   = inputImageRGBA[ps].x;
+  greenChannel[ps] = inputImageRGBA[ps].y;
+  blueChannel[ps]  = inputImageRGBA[ps].z;
 }
 
-//This kernel takes in three color channels and recombines them
-//into one image.  The alpha channel is set to 255 to represent
-//that this image has no transparency.
 __global__
 void recombineChannels(const unsigned char* const redChannel,
                        const unsigned char* const greenChannel,
@@ -170,8 +147,6 @@ void recombineChannels(const unsigned char* const redChannel,
 
   const int thread_1D_pos = thread_2D_pos.y * numCols + thread_2D_pos.x;
 
-  //make sure we don't try and access memory outside the image
-  //by having any threads mapped there return early
   if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows)
     return;
 
@@ -191,26 +166,13 @@ float         *d_filter;
 void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsImage,
                                 const float* const h_filter, const size_t filterWidth)
 {
-
-  //allocate memory for the three different channels
-  //original
   checkCudaErrors(cudaMalloc(&d_red,   sizeof(unsigned char) * numRowsImage * numColsImage));
   checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRowsImage * numColsImage));
   checkCudaErrors(cudaMalloc(&d_blue,  sizeof(unsigned char) * numRowsImage * numColsImage));
 
-  //TODO:
-  //Allocate memory for the filter on the GPU
-  //Use the pointer d_filter that we have already declared for you
-  //You need to allocate memory for the filter with cudaMalloc
-  //be sure to use checkCudaErrors like the above examples to
-  //be able to tell if anything goes wrong
-  //IMPORTANT: Notice that we pass a pointer to a pointer to cudaMalloc
-
-  //TODO:
-  //Copy the filter on the host (h_filter) to the memory you just allocated
-  //on the GPU.  cudaMemcpy(dst, src, numBytes, cudaMemcpyHostToDevice);
-  //Remember to use checkCudaErrors!
-
+  int size = filterWidth*filterWidth*sizeof(float);
+  checkCudaErrors(cudaMalloc(&d_filter, size));
+  checkCudaErrors(cudaMemcpy(d_filter, h_filter, size, cudaMemcpyHostToDevice));
 }
 
 void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_inputImageRGBA,
@@ -220,30 +182,19 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                         unsigned char *d_blueBlurred,
                         const int filterWidth)
 {
-  //TODO: Set reasonable block size (i.e., number of threads per block)
-  const dim3 blockSize;
-
-  //TODO:
-  //Compute correct grid size (i.e., number of blocks per kernel launch)
-  //from the image size and and block size.
-  const dim3 gridSize;
+  const dim3 blockSize(16, 16, 1);
+  const dim3 gridSize(numRows/blockSize.x+1, numCols/blockSize.y+1, 1);
 
   //TODO: Launch a kernel for separating the RGBA image into different color channels
 
-  // Call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
-  // launching your kernel to make sure that you didn't make any mistakes.
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  separateChannels<<<gridSize, blockSize>>>(d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
+  checkCudaErrors(cudaDeviceSynchronize()); checkCudaErrors(cudaGetLastError());
 
-  //TODO: Call your convolution kernel here 3 times, once for each color channel.
+  gaussian_blur<<<gridSize, blockSize>>>(d_red,   d_redBlurred,   numRows, numCols, d_filter, filterWidth);
+  gaussian_blur<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur<<<gridSize, blockSize>>>(d_blue,  d_blueBlurred,  numRows, numCols, d_filter, filterWidth);
+  checkCudaErrors(cudaDeviceSynchronize()); checkCudaErrors(cudaGetLastError());
 
-  // Again, call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
-  // launching your kernel to make sure that you didn't make any mistakes.
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-  // Now we recombine your results. We take care of launching this kernel for you.
-  //
-  // NOTE: This kernel launch depends on the gridSize and blockSize variables,
-  // which you must set yourself.
   recombineChannels<<<gridSize, blockSize>>>(d_redBlurred,
                                              d_greenBlurred,
                                              d_blueBlurred,
@@ -261,4 +212,6 @@ void cleanup() {
   checkCudaErrors(cudaFree(d_red));
   checkCudaErrors(cudaFree(d_green));
   checkCudaErrors(cudaFree(d_blue));
+
+  checkCudaErrors(cudaFree(d_filter));
 }
