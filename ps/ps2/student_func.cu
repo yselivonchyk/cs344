@@ -81,6 +81,8 @@
 //****************************************************************************
 
 #include "utils.h"
+#include <stdio.h>
+
 
 __global__
 void gaussian_blur(const unsigned char* const inputChannel,
@@ -92,12 +94,16 @@ void gaussian_blur(const unsigned char* const inputChannel,
 
   int px = threadIdx.x + blockIdx.x*blockDim.x;
   int py = threadIdx.y + blockIdx.y*blockDim.y;
-  int ps = py+px*numRows;
+  int ps = py*numCols+px;
+
+//  if (blockIdx.x != 200 || blockIdx.y != 200)
+//    return;
 
   if (px >= numCols || py >=  numRows)
     return;
 
   for (int i = 0; i < filterWidth; i++)
+  {
     for(int j = 0; j < filterWidth; j++)
     {
       int fx = px - filterWidth/2 + i;
@@ -106,11 +112,12 @@ void gaussian_blur(const unsigned char* const inputChannel,
       fx = (fx < numCols) ? fx : numCols;
       fy = (0 < fy)       ? fy : 0;
       fy = (fy < numRows) ? fy : numRows;
-
-      int pf = px+py*numCols;
-      res += inputChannel[pf];
+      int pc = fx+fy*numCols;
+      int pf = j*filterWidth+i;
+      res += inputChannel[pc]*filter[pf];
     }
-  outputChannel[ps] = inputChannel[ps];
+  }
+  outputChannel[ps] = (int)res % 256;
 }
 
 
@@ -124,7 +131,7 @@ void separateChannels(const uchar4* const inputImageRGBA,
 {
   int px = threadIdx.x + blockIdx.x*blockDim.x;
   int py = threadIdx.y + blockIdx.y*blockDim.y;
-  int ps = py+px*numRows;
+  int ps = py*numCols+px;
 
   if (px >= numCols || py >=  numRows)
     return;
@@ -183,7 +190,10 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                         const int filterWidth)
 {
   const dim3 blockSize(16, 16, 1);
-  const dim3 gridSize(numRows/blockSize.x+1, numCols/blockSize.y+1, 1);
+  const dim3 gridSize(numCols/blockSize.x+1, numRows/blockSize.y+1, 1);
+//  const dim3 blockSize(1, 1, 1);
+//  const dim3 gridSize(1, 1, 1);
+
 
   //TODO: Launch a kernel for separating the RGBA image into different color channels
 
