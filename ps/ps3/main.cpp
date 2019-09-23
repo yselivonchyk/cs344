@@ -49,12 +49,12 @@ int main(int argc, char **argv) {
 	case 2:
 	  input_file = std::string(argv[1]);
 	  output_file = "HW3_output.png";
-	  reference_file = "HW3_reference.png";
+	  reference_file = "memorial_png_gold.png";
 	  break;
 	case 3:
 	  input_file  = std::string(argv[1]);
       output_file = std::string(argv[2]);
-	  reference_file = "HW3_reference.png";
+	  reference_file = "memorial_png_gold.png";
 	  break;
 	case 4:
 	  input_file  = std::string(argv[1]);

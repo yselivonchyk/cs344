@@ -80,6 +80,144 @@
 */
 
 #include "utils.h"
+#include <stdio.h>
+#include <functional>
+
+
+__global__
+void __reduce_max(const float* const din, float* gdata, int count)
+{
+  extern __shared__ float sdata[];
+
+  int mid = threadIdx.x + blockIdx.x*blockDim.x;
+  int tid = threadIdx.x;
+
+  if (mid < count)
+    sdata[tid] = din[mid];
+  __syncthreads();
+//  return;
+
+  for(unsigned int s = blockDim.x/2; s > 0; s >>= 1){
+    if(tid < s && mid+s < count)
+    {
+      sdata[tid] = sdata[tid+s] > sdata[tid] ? sdata[tid+s] : sdata[tid];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0)
+    gdata[blockIdx.x] = sdata[tid];
+}
+
+
+float reduce_max(const float* const d_logLuminance,
+            const size_t numRows,
+            const size_t numCols
+            )
+{
+  const int blockSize = 1024;
+  const int gridSize  = (numCols*numRows)/blockSize+1;
+  int size = numCols*numRows*sizeof(float);
+
+  float* gdata;
+  float* din;
+  cudaMallocManaged(&gdata, gridSize*sizeof(float));
+  checkCudaErrors(cudaMallocManaged(&din, size));
+  checkCudaErrors(cudaMemcpyAsync(din, d_logLuminance, size, cudaMemcpyDeviceToDevice));
+
+  __reduce_max<<<gridSize, blockSize, blockSize*sizeof(float)>>>(din, gdata, numRows*numCols);
+
+  checkCudaErrors(cudaGetLastError());
+  checkCudaErrors(cudaDeviceSynchronize());
+  cudaMemPrefetchAsync(gdata, gridSize*sizeof(float), cudaCpuDeviceId);
+  float max = gdata[0];
+  for(int i = 0; i < gridSize; i++)
+    max = max > gdata[i] ? max : gdata[i];
+
+  cudaFree(gdata);
+  cudaFree(din);
+  return max;
+}
+
+
+__global__
+void __reduce_min(const float* const din, float* gdata, int count)
+{
+  extern __shared__ float sdata[];
+
+  int mid = threadIdx.x + blockIdx.x*blockDim.x;
+  int tid = threadIdx.x;
+
+  if (mid < count)
+    sdata[tid] = din[mid];
+  __syncthreads();
+//  return;
+
+  for(unsigned int s = blockDim.x/2; s > 0; s >>= 1){
+    if(tid < s && mid+s < count)
+    {
+      sdata[tid] = sdata[tid+s] < sdata[tid] ? sdata[tid+s] : sdata[tid];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0)
+    gdata[blockIdx.x] = sdata[tid];
+}
+
+
+float reduce_min(const float* const d_logLuminance,
+            const size_t numRows,
+            const size_t numCols
+            )
+{
+  const int blockSize = 1024;
+  const int gridSize  = (numCols*numRows)/blockSize+1;
+  int size = numCols*numRows*sizeof(float);
+
+  float* gdata;
+  float* din;
+  cudaMallocManaged(&gdata, gridSize*sizeof(float));
+  checkCudaErrors(cudaMallocManaged(&din, size));
+  checkCudaErrors(cudaMemcpyAsync(din, d_logLuminance, size, cudaMemcpyDeviceToDevice));
+
+  __reduce_min<<<gridSize, blockSize, blockSize*sizeof(float)>>>(din, gdata, numRows*numCols);
+
+  checkCudaErrors(cudaGetLastError());
+  checkCudaErrors(cudaDeviceSynchronize());
+  cudaMemPrefetchAsync(gdata, gridSize*sizeof(float), cudaCpuDeviceId);
+  float max = gdata[0];
+  for(int i = 0; i < gridSize; i++)
+    max = max < gdata[i] ? max : gdata[i];
+
+  cudaFree(gdata);
+  cudaFree(din);
+  return max;
+}
+
+__global__
+void histogram(const float* const din, unsigned int* const cdf, int count, float min, float max, const size_t numBins)
+{
+  int ps = threadIdx.x + blockDim.x*blockIdx.x;
+
+
+  if (ps > count)
+    return;
+
+  int index = (int)(din[ps]-min)/(max-min)*numBins;
+//  if (index != 0)
+//    printf("%3d %f\n", index, din[ps]);
+  if (index>numBins)
+    printf("%f min:%f max:%f\n", din[ps], min, max);
+  atomicAdd(&cdf[index], 1);
+
+}
+
+__global__
+void prefix_scan(unsigned int* const cdf)
+{
+
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -89,6 +227,44 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
+  max_logLum = reduce_max(d_logLuminance, numRows, numCols);
+  min_logLum = reduce_min(d_logLuminance, numRows, numCols);
+
+  printf(" MAX: %f\n", max_logLum);
+  printf(" MIN: %f\n", min_logLum);
+  printf(" NB:  %d\n", (int)numBins);
+  const int blockSize = 1024;
+  const int gridSize = numCols*numRows/blockSize+1;
+
+  histogram<<<gridSize, blockSize>>>(d_logLuminance, d_cdf, numCols*numRows, min_logLum, max_logLum, numBins);
+  checkCudaErrors(cudaDeviceSynchronize());
+
+  unsigned int* h_cdf;
+  cudaMallocManaged(&h_cdf, numBins*sizeof(unsigned int));
+  cudaMemcpyAsync(h_cdf, d_cdf, numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  for(unsigned i = 0; i < numBins; i++){
+    if (i==0 || h_cdf[i] != 0)
+      printf("%03d %d\n", i, h_cdf[i]);
+  }
+
+  int x = 0;
+  for(int i = 0; i < numBins; i ++)
+  {
+    int tmp = h_cdf[i];
+    h_cdf[i] = x;
+    x += tmp;
+  }
+
+  for(unsigned i = 0; i < numBins; i++){
+    if (i==0 || h_cdf[i] != 0)
+    {
+//      printf("%03d %d\n", i, h_cdf[i]);
+    }
+  }
+
+  cudaMemcpyAsync(d_cdf, h_cdf, numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost);
+
+
   //TODO
   /*Here are the steps you need to implement
     1) find the minimum and maximum value in the input logLuminance channel
