@@ -82,11 +82,27 @@
 #include "utils.h"
 #include <stdio.h>
 #include <functional>
+#include <stdbool.h>
+
+__host__ __device__
+float select_max(float x, float y)
+{
+    return (x > y) ? x : y;
+}
+
+
+__host__ __device__
+float select_min(float x, float y)
+{
+    return (x < y) ? x : y;
+}
+
 
 
 __global__
-void __reduce_max(const float* const din, float* gdata, int count)
+void __reduce(const float* const din, float* gdata, int count, bool isMin)
 {
+  float (*f)(float, float) = isMin ? select_min : select_max;
   extern __shared__ float sdata[];
 
   int mid = threadIdx.x + blockIdx.x*blockDim.x;
@@ -100,7 +116,7 @@ void __reduce_max(const float* const din, float* gdata, int count)
   for(unsigned int s = blockDim.x/2; s > 0; s >>= 1){
     if(tid < s && mid+s < count)
     {
-      sdata[tid] = sdata[tid+s] > sdata[tid] ? sdata[tid+s] : sdata[tid];
+      sdata[tid] = (*f)(sdata[tid+s], sdata[tid]);
     }
     __syncthreads();
   }
@@ -110,11 +126,13 @@ void __reduce_max(const float* const din, float* gdata, int count)
 }
 
 
-float reduce_max(const float* const d_logLuminance,
+float reduce(const float* const d_logLuminance,
             const size_t numRows,
-            const size_t numCols
+            const size_t numCols,
+            bool isMin
             )
 {
+  float (*f)(float, float) = isMin ? select_min : select_max;
   const int blockSize = 1024;
   const int gridSize  = (numCols*numRows)/blockSize+1;
   int size = numCols*numRows*sizeof(float);
@@ -125,70 +143,14 @@ float reduce_max(const float* const d_logLuminance,
   checkCudaErrors(cudaMallocManaged(&din, size));
   checkCudaErrors(cudaMemcpyAsync(din, d_logLuminance, size, cudaMemcpyDeviceToDevice));
 
-  __reduce_max<<<gridSize, blockSize, blockSize*sizeof(float)>>>(din, gdata, numRows*numCols);
+  __reduce<<<gridSize, blockSize, blockSize*sizeof(float)>>>(din, gdata, numRows*numCols, isMin);
 
   checkCudaErrors(cudaGetLastError());
   checkCudaErrors(cudaDeviceSynchronize());
   cudaMemPrefetchAsync(gdata, gridSize*sizeof(float), cudaCpuDeviceId);
   float max = gdata[0];
   for(int i = 0; i < gridSize; i++)
-    max = max > gdata[i] ? max : gdata[i];
-
-  cudaFree(gdata);
-  cudaFree(din);
-  return max;
-}
-
-
-__global__
-void __reduce_min(const float* const din, float* gdata, int count)
-{
-  extern __shared__ float sdata[];
-
-  int mid = threadIdx.x + blockIdx.x*blockDim.x;
-  int tid = threadIdx.x;
-
-  if (mid < count)
-    sdata[tid] = din[mid];
-  __syncthreads();
-//  return;
-
-  for(unsigned int s = blockDim.x/2; s > 0; s >>= 1){
-    if(tid < s && mid+s < count)
-    {
-      sdata[tid] = sdata[tid+s] < sdata[tid] ? sdata[tid+s] : sdata[tid];
-    }
-    __syncthreads();
-  }
-
-  if (tid == 0)
-    gdata[blockIdx.x] = sdata[tid];
-}
-
-
-float reduce_min(const float* const d_logLuminance,
-            const size_t numRows,
-            const size_t numCols
-            )
-{
-  const int blockSize = 1024;
-  const int gridSize  = (numCols*numRows)/blockSize+1;
-  int size = numCols*numRows*sizeof(float);
-
-  float* gdata;
-  float* din;
-  cudaMallocManaged(&gdata, gridSize*sizeof(float));
-  checkCudaErrors(cudaMallocManaged(&din, size));
-  checkCudaErrors(cudaMemcpyAsync(din, d_logLuminance, size, cudaMemcpyDeviceToDevice));
-
-  __reduce_min<<<gridSize, blockSize, blockSize*sizeof(float)>>>(din, gdata, numRows*numCols);
-
-  checkCudaErrors(cudaGetLastError());
-  checkCudaErrors(cudaDeviceSynchronize());
-  cudaMemPrefetchAsync(gdata, gridSize*sizeof(float), cudaCpuDeviceId);
-  float max = gdata[0];
-  for(int i = 0; i < gridSize; i++)
-    max = max < gdata[i] ? max : gdata[i];
+    max = (*f)(max, gdata[i]);
 
   cudaFree(gdata);
   cudaFree(din);
@@ -205,19 +167,12 @@ void histogram(const float* const din, unsigned int* const cdf, int count, float
     return;
 
   int index = (int)(din[ps]-min)/(max-min)*numBins;
-//  if (index != 0)
-//    printf("%3d %f\n", index, din[ps]);
   if (index>numBins)
     printf("%f min:%f max:%f\n", din[ps], min, max);
   atomicAdd(&cdf[index], 1);
 
 }
 
-__global__
-void prefix_scan(unsigned int* const cdf)
-{
-
-}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -227,8 +182,8 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  max_logLum = reduce_max(d_logLuminance, numRows, numCols);
-  min_logLum = reduce_min(d_logLuminance, numRows, numCols);
+  max_logLum = reduce(d_logLuminance, numRows, numCols, false);
+  min_logLum = reduce(d_logLuminance, numRows, numCols, true);
 
   printf(" MAX: %f\n", max_logLum);
   printf(" MIN: %f\n", min_logLum);
@@ -242,11 +197,13 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   unsigned int* h_cdf;
   cudaMallocManaged(&h_cdf, numBins*sizeof(unsigned int));
   cudaMemcpyAsync(h_cdf, d_cdf, numBins*sizeof(unsigned int), cudaMemcpyDeviceToHost);
-  for(unsigned i = 0; i < numBins; i++){
+
+
+  for(unsigned i = 0; i < numBins; i++)
     if (i==0 || h_cdf[i] != 0)
       printf("%03d %d\n", i, h_cdf[i]);
-  }
 
+  // sequential SCAN for CDF
   int x = 0;
   for(int i = 0; i < numBins; i ++)
   {
