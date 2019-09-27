@@ -41,14 +41,201 @@
    at the end.
 
  */
+#include <stdint.h>
+#include <limits.h>
 
 
-void your_sort(unsigned int* const d_inputVals,
-               unsigned int* const d_inputPos,
-               unsigned int* const d_outputVals,
-               unsigned int* const d_outputPos,
+
+__device__
+int scan_op(int x, int y){
+  return x+y;
+}
+
+__global__
+void scan_exclusive(unsigned int* const filter, const size_t num)
+{
+  __shared__ unsigned int* sdata;
+
+  int abs_pos = threadIdx.x + blockIdx.x*blockDim.x;
+  if (abs_pos < num)
+    data[threadIdx] = filter[abs_pos];
+  __syncthreads();
+
+  unsigned int pos = threadIdx.x;
+  for (unsigned int shift = 1; shift < num; shift >>= 1){
+    if((pos & shift) > 0 && (abs_pos+shift < num) && (pos + shift < blockDim.x))
+      data[pos+shift] = op(data[pos], data[pos+shift])
+    __syncthreads();
+  }
+
+  if(pos == blockDim.x)
+    data[pos] = 0;
+  __syncthreads();
+
+  for (unsigned int shift = 1; shift < num; shift >>= 1){
+    if((pos & shift) > 0 && (abs_pos+shift < num) && (pos + shift < blockDim.x)){
+      data[pos+shift] = op(data[pos], data[pos+shift]);
+      data[pos] = data[pos+shift];
+    }
+    __syncthreads();
+  }
+}
+
+
+void scan
+
+
+__global__
+void scatter(unsigned int* d_inputVals,
+               unsigned int* d_inputPos,
+               unsigned int* d_outputVals,
+               unsigned int* d_outputPos,
                const size_t numElems)
-{ 
-  //TODO
-  //PUT YOUR SORT HERE
+{
+  int pos = threadIdx.x + blockIdx.x*blockDim.x;
+  if(pos < numElems){
+    d_outputPos[pos] = d_inputPos[pos];
+    d_outputVals[pos] = d_inputVals[pos];
+  }
+}
+
+void swap(&unsigned int* a, &unsigned int* b){
+  unsigned int* tmp = a;
+  a = b;
+  b = tmp;
+}
+
+__host__ __device__
+unsigned int round_up(unsigned int in){
+  size_t out = 1;
+  while (out < in)
+    out >>= 1;
+  return out;
+}
+
+__global__
+void map_offset(unsigned int* in, size_t count, size_t offset){
+  unsigned int pos = threadIdx.x + blockIdx.x*blockDim.x;
+  unsigned int source = blockIdx.x*blockDim.x;
+
+  if(threadIdx.x == 0)
+    in[pos] += offset;
+  __syncthreads();
+  if(pos < count && threadIdx.x != 0)
+    in[pos] += in[source]
+}
+
+__global__
+void reduce_sum(unsigned int* filter, size_t count, unsigned int* out){
+  extern __shared__ unsigned int sdata;
+  unsigned int tid = threadIdx.x;
+  unsigned int pos = threadIdx.x + blockIdx.x*blockSize.x;
+
+  sdata[tid] = filter[pos];
+  __syncthreads();
+
+  for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
+    if (tid < s)
+      sdata[tid] += sdata[tid + s];
+    __syncthreads();
+  }
+
+  if(tid == 0)
+    atomicAdd(&out[0], sdata[0]);
+}
+
+__global__
+void map_equal(unsigned int* in, unsigned int mask, bool mask_match, unsigned int* filter, size_t count){
+  unsigned int pos = threadIdx.x + blockDim.x*blockIdx.x;
+
+  if (pos < count)
+    filter[pos] == ((in[pos] & mask == mask) == mask_match) ? 1 : 0;
+}
+
+__global__
+void scatter_filtered(unsigned int* in, unsigned int* inVal,
+                            unsigned int* filter, unsigned int* indexes,
+                            size_t count,
+                            unsigned int* out, unsigned int* outVal)
+{
+  unsigned int pos = threadIdx.x + blockDim.x*blockIdx.x;
+  if (pos < count && filter[pos] > 0){
+    unsigned int tar = indexes[pos];
+    out[tar] = in[pos];
+    outVal[tar] = inVal[pos];
+  }
+}
+
+
+void compact(unsigned int* in, unsigned int* inVal, size_t count,
+             unsigned int mask, bool mask_match, unsigned int offset,
+             &unsigned int* out, &unsigned int* outVal, &size_t outCount)
+{
+  unsigned int* filter;
+  unsigned int* indexes;
+  unsigned int* sum;
+  unsigned int round_count = round_up(count);
+  dim3 block(1024);
+  dim3 grid(count/block.x);
+  dim3 rgrid(round_count/block.x);
+
+  cudaMallocManaged(&filter,  count*sizeof(unsigned int);
+  cudaMallocManaged(&indexes, round_count*sizeof(unsigned int);
+  cudaMallocManaged(&sum, count*sizeof(unsigned int);
+
+  map_equal<<<grid, block>>>(in, mask, elem, filter, count);
+  unsigned int* sumout;
+  cudaMallocManaged(&sumout, sizeof(unsigned int));
+  reduce_sum<<<grid, block, block.x*sizeof(unsigned int)>>>(filter, count, sumout);
+  cudaMemcpy(indexes, filter, count*sizeof(unsigned int));
+
+  scan_exclusive<<<grid, block, block.x*sizeof(unsigned int)>>>(indexes, round_count);
+  // scan blocks
+  int running_sum = 0;
+  for(int i = 1; i < grid.x; i++)
+  {
+    running_sum += indexes[i*block.x-1];
+    indexes[i*block.x] += running_sum;
+  }
+  // add offset per block
+  map_offset<<<grid, block>>>(indexes, round_count, offset+1);
+
+  num_remaining = sum[count-1];
+  cudaMallocManaged(&out,    num_remaining*sizeof(unsigned int);
+  cudaMallocManaged(&outVal, num_remaining*sizeof(unsigned int);
+
+  scatter_filtered(in, inVal, filter, indexes, count, out, outVal);
+}
+
+
+void your_sort(unsigned int* d_inputVals,
+               unsigned int* d_inputPos,
+               unsigned int* d_outputVals,
+               unsigned int* d_outputPos,
+               const size_t numElems)
+{
+  size_t num_zero;
+  size_t num_ones;
+  unsigned int* out_zero;
+  unsigned int* out_zero_values;
+  unsigned int* out_ones;
+  unsigned int* out_ones_values;
+
+  int mask = 1;
+  for(int i = UINT_MAX; i > 0; i >>= 1){
+    compact(d_inputVals, d_inputPos, numElems, mask, 0, 0,        &out_zero, &out_zero_values, &num_zero);
+    compact(d_inputVals, d_inputPos, numElems, mask, 1, num_zero, &out_ones, &out_ones_values, &num_ones);
+    // merge
+    cudaMemcpy(d_inputVals,              out_zeroes,      num_zero);
+    cudaMemcpy(d_inputPos,               out_zero_values, num_zero);
+    cudaMemcpy(&(d_inputVals[num_zero]), out_ones,        num_ones);
+    cudaMemcpy(&(d_inputPos[num_zero]),  out_ones_values, num_ones);
+    // scatter
+    scatter<<<numElems/1024, 1024>>>(d_inputVals, d_inputPos, d_outputVals, d_outputPos, numElems);
+
+    swap(d_inputVals, d_outputVals);
+    swap(d_inputPos, d_outputPos);
+
+    mask <<=1;
+  }
 }

@@ -111,7 +111,6 @@ void __reduce(const float* const din, float* gdata, int count, bool isMin)
   if (mid < count)
     sdata[tid] = din[mid];
   __syncthreads();
-//  return;
 
   for(unsigned int s = blockDim.x/2; s > 0; s >>= 1){
     if(tid < s && mid+s < count)
@@ -162,7 +161,6 @@ void histogram(const float* const din, unsigned int* const cdf, int count, float
 {
   int ps = threadIdx.x + blockDim.x*blockIdx.x;
 
-
   if (ps > count)
     return;
 
@@ -170,7 +168,6 @@ void histogram(const float* const din, unsigned int* const cdf, int count, float
   if (index>numBins)
     printf("%f min:%f max:%f\n", din[ps], min, max);
   atomicAdd(&cdf[index], 1);
-
 }
 
 
