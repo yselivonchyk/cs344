@@ -59,7 +59,7 @@ int scan_op(int x, int y){
 __global__
 void scan_exclusive(unsigned int* const filter, const size_t num)
 {
-  __shared__ unsigned int* sdata;
+  extern __shared__ unsigned int sdata[];
 
   unsigned int pos = threadIdx.x;
   unsigned int abs_pos = threadIdx.x + blockIdx.x*blockDim.x;
@@ -68,23 +68,33 @@ void scan_exclusive(unsigned int* const filter, const size_t num)
     sdata[pos] = filter[abs_pos];
   __syncthreads();
 
-  for (unsigned int shift = 1; shift < num; shift >>= 1){
-    if((pos & shift) > 0 && (abs_pos+shift < num) && (pos + shift < blockDim.x))
-      sdata[pos+shift] = scan_op(sdata[pos], sdata[pos+shift]);
-    __syncthreads();
-  }
-
-  if(pos == blockDim.x)
-    sdata[pos] = 0;
-  __syncthreads();
-
-  for (unsigned int shift = 1; shift < num; shift >>= 1){
-    if((pos & shift) > 0 && (abs_pos+shift < num) && (pos + shift < blockDim.x)){
-      sdata[pos+shift] = scan_op(sdata[pos], sdata[pos+shift]);
-      sdata[pos] = sdata[pos+shift];
+  for (unsigned int shift = 1; shift < blockDim.x; shift <<= 1){
+    bool use = (pos & (shift | shift-1)) == (shift | shift-1); // reset top bits, check that all lower bits are 1s.
+    if(use && (abs_pos < num) && (pos - shift >= 0)) {
+//      printf("%u [%02u]+[%02u]: (%u)+(%u) -> (%u)\n", shift, pos - shift, pos, sdata[pos - shift], sdata[pos], sdata[pos] + sdata[pos - shift]);
+      sdata[pos] = scan_op(sdata[pos], sdata[pos - shift]);
     }
     __syncthreads();
   }
+
+  if(pos == blockDim.x-1)
+    sdata[pos] = 0;
+  __syncthreads();
+
+  if ((blockDim.x & blockDim.x-1) != 0) printf("ALLERT");
+
+  unsigned int tmp;
+  for (unsigned int shift = blockDim.x/2; shift > 0; shift >>= 1){
+    bool use = (pos & (shift | shift-1)) == (shift | shift-1); // reset top bits, check that all lower bits are 1s.
+    if(use && (abs_pos < num) && (pos - shift >= 0)) {
+//      printf("%u [%02u],[%02u]:  %u,%u -> %u,%u\n", shift, pos - shift, pos, sdata[pos-shift], sdata[pos], sdata[pos], sdata[pos] + sdata[pos - shift]);
+      tmp = sdata[pos-shift]+sdata[pos];
+      sdata[pos-shift] = sdata[pos];
+      sdata[pos] = tmp;
+    }
+    __syncthreads();
+  }
+//  printf("tid:%u %u\n", pos, sdata[pos]);
 }
 
 
@@ -187,9 +197,13 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   unsigned int* sumout;
   size_t round_count;
   round_up(count, &round_count);
-  dim3 block(1024);
-  dim3 grid(count/block.x+1);
-  dim3 rgrid(round_count/block.x);
+//  dim3 block(1024);
+//  dim3 grid(count/block.x+1);
+//  dim3 rgrid(round_count/block.x);
+
+  dim3 block(16);
+  dim3 grid(1);
+  dim3 rgrid(1);
 
   checkCudaErrors(cudaGetLastError());
   checkCudaErrors(cudaMallocManaged(&filter,  count*sizeof(unsigned int)));
@@ -200,20 +214,20 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   map_equal<<<grid, block>>>(in, mask, mask_match, filter, count);
   checkCudaErrors(cudaDeviceSynchronize());
 
-
-  printf("maskaa %d\n", sumout);
-
-//  cudaMallocManaged(&sumout, sizeof(unsigned int));
-  printf("line %u (%d)\n", 197, block.x);
   reduce_sum<<<grid, block, block.x*sizeof(unsigned int)>>>(filter, count, sumout);
   checkCudaErrors(cudaDeviceSynchronize());
   checkCudaErrors(cudaGetLastError());
 
-  printf("line %u (filterd:%u/%u)\n", 203, sumout[0], count);
   cudaMemcpy(indexes, filter, count*sizeof(unsigned int), cudaMemcpyDeviceToDevice);
   checkCudaErrors(cudaGetLastError());
 
+  printf("line %u (filterd:%u/%u)\n", 216, sumout[0], count);
   scan_exclusive<<<grid, block, block.x*sizeof(unsigned int)>>>(indexes, round_count);
+  checkCudaErrors(cudaDeviceSynchronize());
+  checkCudaErrors(cudaGetLastError());
+  printf("line %u (filterd:%u/%u)\n", 220, sumout[0], count);
+
+
   // scan blocks
   int running_sum = 0;
   for(int i = 1; i < grid.x; i++)
