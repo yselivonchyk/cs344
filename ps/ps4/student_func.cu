@@ -1,3 +1,9 @@
+ #ifdef __CDT_PARSER__
+ #define __global__
+ #define __device__
+ #define __shared__
+ #endif
+
 //Udacity HW 4
 //Radix Sorting
 
@@ -124,7 +130,7 @@ void map_offset(unsigned int* in, size_t count, size_t offset){
 }
 
 __global__
-void reduce_sum(unsigned int* filter, size_t count, int* out){
+void reduce_sum(unsigned int* filter, size_t count, unsigned int* out){
   extern __shared__ unsigned int sdata[];
   int tid = threadIdx.x;
   int pos = threadIdx.x + blockIdx.x*blockDim.x;
@@ -139,8 +145,10 @@ void reduce_sum(unsigned int* filter, size_t count, int* out){
     __syncthreads();
   }
 
-  if(tid == 0)
-    atomicAdd(&out[0], 0);
+  if(tid == 0) {
+    atomicAdd(&out[0], sdata[tid]);
+//    printf("%d -> %d\n", pos, sdata[tid]);
+  }
 }
 
 __global__
@@ -148,7 +156,7 @@ void map_equal(unsigned int* in, unsigned int mask, bool mask_match, unsigned in
   unsigned int pos = threadIdx.x + blockDim.x*blockIdx.x;
 
   if (pos < count) {
-    filter[pos] = (in[pos] & mask == mask) == mask_match;
+    filter[pos] = (in[pos] & mask) == mask_match;
   }
 
 }
@@ -176,6 +184,7 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   unsigned int* filter;
   unsigned int* indexes;
   unsigned int* sum;
+  unsigned int* sumout;
   size_t round_count;
   round_up(count, &round_count);
   dim3 block(1024);
@@ -186,20 +195,21 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   checkCudaErrors(cudaMallocManaged(&filter,  count*sizeof(unsigned int)));
   checkCudaErrors(cudaMallocManaged(&indexes, round_count*sizeof(unsigned int)));
   checkCudaErrors(cudaMallocManaged(&sum, count*sizeof(unsigned int)));
+  checkCudaErrors(cudaMallocManaged(&sumout, sizeof(unsigned int)));
 
   map_equal<<<grid, block>>>(in, mask, mask_match, filter, count);
   checkCudaErrors(cudaDeviceSynchronize());
 
-  int sumout=0;
+
   printf("maskaa %d\n", sumout);
 
 //  cudaMallocManaged(&sumout, sizeof(unsigned int));
-  printf("line %u %d\n", 197, block.x);
-  reduce_sum<<<grid, block, block.x*sizeof(unsigned int)>>>(filter, count, &sumout);
+  printf("line %u (%d)\n", 197, block.x);
+  reduce_sum<<<grid, block, block.x*sizeof(unsigned int)>>>(filter, count, sumout);
   checkCudaErrors(cudaDeviceSynchronize());
   checkCudaErrors(cudaGetLastError());
 
-  printf("line %u\n", 203);
+  printf("line %u (filterd:%u/%u)\n", 203, sumout[0], count);
   cudaMemcpy(indexes, filter, count*sizeof(unsigned int), cudaMemcpyDeviceToDevice);
   checkCudaErrors(cudaGetLastError());
 
