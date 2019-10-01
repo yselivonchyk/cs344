@@ -45,7 +45,6 @@
 #include <limits.h>
 
 
-
 __device__
 int scan_op(int x, int y){
   return x+y;
@@ -56,33 +55,31 @@ void scan_exclusive(unsigned int* const filter, const size_t num)
 {
   __shared__ unsigned int* sdata;
 
-  int abs_pos = threadIdx.x + blockIdx.x*blockDim.x;
+  unsigned int pos = threadIdx.x;
+  unsigned int abs_pos = threadIdx.x + blockIdx.x*blockDim.x;
+
   if (abs_pos < num)
-    data[threadIdx] = filter[abs_pos];
+    sdata[pos] = filter[abs_pos];
   __syncthreads();
 
-  unsigned int pos = threadIdx.x;
   for (unsigned int shift = 1; shift < num; shift >>= 1){
     if((pos & shift) > 0 && (abs_pos+shift < num) && (pos + shift < blockDim.x))
-      data[pos+shift] = op(data[pos], data[pos+shift])
+      sdata[pos+shift] = scan_op(sdata[pos], sdata[pos+shift]);
     __syncthreads();
   }
 
   if(pos == blockDim.x)
-    data[pos] = 0;
+    sdata[pos] = 0;
   __syncthreads();
 
   for (unsigned int shift = 1; shift < num; shift >>= 1){
     if((pos & shift) > 0 && (abs_pos+shift < num) && (pos + shift < blockDim.x)){
-      data[pos+shift] = op(data[pos], data[pos+shift]);
-      data[pos] = data[pos+shift];
+      sdata[pos+shift] = scan_op(sdata[pos], sdata[pos+shift]);
+      sdata[pos] = sdata[pos+shift];
     }
     __syncthreads();
   }
 }
-
-
-void scan
 
 
 __global__
@@ -99,18 +96,19 @@ void scatter(unsigned int* d_inputVals,
   }
 }
 
-void swap(&unsigned int* a, &unsigned int* b){
-  unsigned int* tmp = a;
+void swap_arrays(unsigned int** a, unsigned int** b)
+{
+  unsigned int** tmp;
+  tmp = a;
   a = b;
   b = tmp;
 }
 
-__host__ __device__
-unsigned int round_up(unsigned int in){
-  size_t out = 1;
-  while (out < in)
-    out >>= 1;
-  return out;
+void round_up(size_t in, size_t* out){
+  *out = 1;
+  int i = 200;
+  while (*out < in)
+    *out <<= 1;
 }
 
 __global__
@@ -122,34 +120,37 @@ void map_offset(unsigned int* in, size_t count, size_t offset){
     in[pos] += offset;
   __syncthreads();
   if(pos < count && threadIdx.x != 0)
-    in[pos] += in[source]
+    in[pos] += in[source];
 }
 
 __global__
-void reduce_sum(unsigned int* filter, size_t count, unsigned int* out){
-  extern __shared__ unsigned int sdata;
-  unsigned int tid = threadIdx.x;
-  unsigned int pos = threadIdx.x + blockIdx.x*blockSize.x;
+void reduce_sum(unsigned int* filter, size_t count, int* out){
+  extern __shared__ unsigned int sdata[];
+  int tid = threadIdx.x;
+  int pos = threadIdx.x + blockIdx.x*blockDim.x;
 
-  sdata[tid] = filter[pos];
+  if(pos < count)
+    sdata[tid] = filter[pos];
   __syncthreads();
 
   for (unsigned int s=blockDim.x/2; s>0; s>>=1) {
-    if (tid < s)
+    if (tid < s && pos+s < count)
       sdata[tid] += sdata[tid + s];
     __syncthreads();
   }
 
   if(tid == 0)
-    atomicAdd(&out[0], sdata[0]);
+    atomicAdd(&out[0], 0);
 }
 
 __global__
 void map_equal(unsigned int* in, unsigned int mask, bool mask_match, unsigned int* filter, size_t count){
   unsigned int pos = threadIdx.x + blockDim.x*blockIdx.x;
 
-  if (pos < count)
-    filter[pos] == ((in[pos] & mask == mask) == mask_match) ? 1 : 0;
+  if (pos < count) {
+    filter[pos] = (in[pos] & mask == mask) == mask_match;
+  }
+
 }
 
 __global__
@@ -166,28 +167,41 @@ void scatter_filtered(unsigned int* in, unsigned int* inVal,
   }
 }
 
-
 void compact(unsigned int* in, unsigned int* inVal, size_t count,
              unsigned int mask, bool mask_match, unsigned int offset,
-             &unsigned int* out, &unsigned int* outVal, &size_t outCount)
+             unsigned int** out_p, unsigned int** outVal_p,
+             size_t* outCount)
 {
+  checkCudaErrors(cudaGetLastError());
   unsigned int* filter;
   unsigned int* indexes;
   unsigned int* sum;
-  unsigned int round_count = round_up(count);
+  size_t round_count;
+  round_up(count, &round_count);
   dim3 block(1024);
-  dim3 grid(count/block.x);
+  dim3 grid(count/block.x+1);
   dim3 rgrid(round_count/block.x);
 
-  cudaMallocManaged(&filter,  count*sizeof(unsigned int);
-  cudaMallocManaged(&indexes, round_count*sizeof(unsigned int);
-  cudaMallocManaged(&sum, count*sizeof(unsigned int);
+  checkCudaErrors(cudaGetLastError());
+  checkCudaErrors(cudaMallocManaged(&filter,  count*sizeof(unsigned int)));
+  checkCudaErrors(cudaMallocManaged(&indexes, round_count*sizeof(unsigned int)));
+  checkCudaErrors(cudaMallocManaged(&sum, count*sizeof(unsigned int)));
 
-  map_equal<<<grid, block>>>(in, mask, elem, filter, count);
-  unsigned int* sumout;
-  cudaMallocManaged(&sumout, sizeof(unsigned int));
-  reduce_sum<<<grid, block, block.x*sizeof(unsigned int)>>>(filter, count, sumout);
-  cudaMemcpy(indexes, filter, count*sizeof(unsigned int));
+  map_equal<<<grid, block>>>(in, mask, mask_match, filter, count);
+  checkCudaErrors(cudaDeviceSynchronize());
+
+  int sumout=0;
+  printf("maskaa %d\n", sumout);
+
+//  cudaMallocManaged(&sumout, sizeof(unsigned int));
+  printf("line %u %d\n", 197, block.x);
+  reduce_sum<<<grid, block, block.x*sizeof(unsigned int)>>>(filter, count, &sumout);
+  checkCudaErrors(cudaDeviceSynchronize());
+  checkCudaErrors(cudaGetLastError());
+
+  printf("line %u\n", 203);
+  cudaMemcpy(indexes, filter, count*sizeof(unsigned int), cudaMemcpyDeviceToDevice);
+  checkCudaErrors(cudaGetLastError());
 
   scan_exclusive<<<grid, block, block.x*sizeof(unsigned int)>>>(indexes, round_count);
   // scan blocks
@@ -200,11 +214,12 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   // add offset per block
   map_offset<<<grid, block>>>(indexes, round_count, offset+1);
 
-  num_remaining = sum[count-1];
-  cudaMallocManaged(&out,    num_remaining*sizeof(unsigned int);
-  cudaMallocManaged(&outVal, num_remaining*sizeof(unsigned int);
+  unsigned int num_remaining = sum[count-1];
+  *outCount = num_remaining;
+  cudaMallocManaged(out_p,    num_remaining*sizeof(unsigned int));
+  cudaMallocManaged(outVal_p, num_remaining*sizeof(unsigned int));
 
-  scatter_filtered(in, inVal, filter, indexes, count, out, outVal);
+  scatter_filtered<<<grid, block>>>(in, inVal, filter, indexes, count, *out_p, *outVal_p);
 }
 
 
@@ -214,28 +229,32 @@ void your_sort(unsigned int* d_inputVals,
                unsigned int* d_outputPos,
                const size_t numElems)
 {
+  checkCudaErrors(cudaGetLastError());
   size_t num_zero;
   size_t num_ones;
-  unsigned int* out_zero;
-  unsigned int* out_zero_values;
-  unsigned int* out_ones;
-  unsigned int* out_ones_values;
+  unsigned int** out_zero;
+  unsigned int** out_zero_values;
+  unsigned int** out_ones;
+  unsigned int** out_ones_values;
+
 
   int mask = 1;
-  for(int i = UINT_MAX; i > 0; i >>= 1){
-    compact(d_inputVals, d_inputPos, numElems, mask, 0, 0,        &out_zero, &out_zero_values, &num_zero);
-    compact(d_inputVals, d_inputPos, numElems, mask, 1, num_zero, &out_ones, &out_ones_values, &num_ones);
+  for(unsigned int i = UINT_MAX; i > 0; i >>= 1){
+    printf("REACHED %u\n", i);
+    checkCudaErrors(cudaGetLastError());
+    compact(d_inputVals, d_inputPos, numElems, mask, 0, 0,        out_zero, out_zero_values, &num_zero);
+    compact(d_inputVals, d_inputPos, numElems, mask, 1, num_zero, out_ones, out_ones_values, &num_ones);
     // merge
-    cudaMemcpy(d_inputVals,              out_zeroes,      num_zero);
-    cudaMemcpy(d_inputPos,               out_zero_values, num_zero);
-    cudaMemcpy(&(d_inputVals[num_zero]), out_ones,        num_ones);
-    cudaMemcpy(&(d_inputPos[num_zero]),  out_ones_values, num_ones);
+    cudaMemcpy(d_inputVals,              *out_zero,        num_zero, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(d_inputPos,               *out_zero_values, num_zero, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(&(d_inputVals[num_zero]), *out_ones,        num_ones, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(&(d_inputPos[num_zero]),  *out_ones_values, num_ones, cudaMemcpyDeviceToDevice);
     // scatter
     scatter<<<numElems/1024, 1024>>>(d_inputVals, d_inputPos, d_outputVals, d_outputPos, numElems);
 
-    swap(d_inputVals, d_outputVals);
-    swap(d_inputPos, d_outputPos);
+    swap_arrays(&d_inputVals, &d_outputVals);
+    swap_arrays(&d_inputPos,  &d_outputPos);
 
-    mask <<=1;
+    mask <<= 1;
   }
 }
