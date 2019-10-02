@@ -95,6 +95,9 @@ void scan_exclusive(unsigned int* const filter, const size_t num)
     __syncthreads();
   }
 //  printf("tid:%u %u\n", pos, sdata[pos]);
+
+  if (abs_pos < num)
+    filter[abs_pos] = sdata[pos];
 }
 
 
@@ -197,13 +200,13 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   unsigned int* sumout;
   size_t round_count;
   round_up(count, &round_count);
-//  dim3 block(1024);
-//  dim3 grid(count/block.x+1);
-//  dim3 rgrid(round_count/block.x);
+  dim3 block(1024);
+  dim3 grid(count/block.x+1);
+  dim3 rgrid(round_count/block.x);
 
-  dim3 block(16);
-  dim3 grid(1);
-  dim3 rgrid(1);
+//  dim3 block(16);
+//  dim3 grid(1);
+//  dim3 rgrid(1);
 
   checkCudaErrors(cudaGetLastError());
   checkCudaErrors(cudaMallocManaged(&filter,  count*sizeof(unsigned int)));
@@ -221,31 +224,39 @@ void compact(unsigned int* in, unsigned int* inVal, size_t count,
   cudaMemcpy(indexes, filter, count*sizeof(unsigned int), cudaMemcpyDeviceToDevice);
   checkCudaErrors(cudaGetLastError());
 
-  printf("line %u (filterd:%u/%u)\n", 216, sumout[0], count);
+  printf("line %u (filtred:%u/%u)\n", 216, sumout[0], count);
   scan_exclusive<<<grid, block, block.x*sizeof(unsigned int)>>>(indexes, round_count);
   checkCudaErrors(cudaDeviceSynchronize());
   checkCudaErrors(cudaGetLastError());
-  printf("line %u (filterd:%u/%u)\n", 220, sumout[0], count);
-
+  printf("LINE %u scan_fist_block: %6u -b0- %6u ... %6u -b-1- %6u\n", 230, indexes[0], indexes[block.x-1], indexes[count-count%block.x], indexes[count-1]);
 
   // scan blocks
   int running_sum = 0;
   for(int i = 1; i < grid.x; i++)
   {
-    running_sum += indexes[i*block.x-1];
+    running_sum += indexes[i*block.x-1]+filter[i*block.x-1];
     indexes[i*block.x] += running_sum;
   }
-  // add offset per block
-  map_offset<<<grid, block>>>(indexes, round_count, offset+1);
+  printf("LINE %u scan_fist_block: %6u -b0- %6u ... %6u -b-1- %6u\n", 240, indexes[0], indexes[block.x-1], indexes[count-count%block.x], indexes[count-1]);
 
-  unsigned int num_remaining = sum[count-1];
+  // add offset per block
+  map_offset<<<grid, block>>>(indexes, round_count, offset);
+  checkCudaErrors(cudaDeviceSynchronize());
+  checkCudaErrors(cudaGetLastError());
+  printf("LINE %u scan_fist_block: %6u -b0- %6u ... %6u -b-1- %6u\n", 246, indexes[0], indexes[block.x-1], indexes[count-count%block.x], indexes[count-1]);
+
+
+  unsigned int num_remaining = sumout[0];
   *outCount = num_remaining;
-  cudaMallocManaged(out_p,    num_remaining*sizeof(unsigned int));
-  cudaMallocManaged(outVal_p, num_remaining*sizeof(unsigned int));
+  checkCudaErrors(cudaMallocManaged(out_p,    num_remaining*sizeof(unsigned int)));
+  checkCudaErrors(cudaMallocManaged(outVal_p, num_remaining*sizeof(unsigned int)));
+  printf("LINE %u\n", 253, sumout[0], count);
 
   scatter_filtered<<<grid, block>>>(in, inVal, filter, indexes, count, *out_p, *outVal_p);
+  checkCudaErrors(cudaDeviceSynchronize());
+  checkCudaErrors(cudaGetLastError());
+  printf("LINE %u\n", 258, sumout[0], count);
 }
-
 
 void your_sort(unsigned int* d_inputVals,
                unsigned int* d_inputPos,
@@ -256,25 +267,25 @@ void your_sort(unsigned int* d_inputVals,
   checkCudaErrors(cudaGetLastError());
   size_t num_zero;
   size_t num_ones;
-  unsigned int** out_zero;
-  unsigned int** out_zero_values;
-  unsigned int** out_ones;
-  unsigned int** out_ones_values;
+  unsigned int* out_zero;
+  unsigned int* out_zero_values;
+  unsigned int* out_ones;
+  unsigned int* out_ones_values;
 
 
   int mask = 1;
   for(unsigned int i = UINT_MAX; i > 0; i >>= 1){
     printf("REACHED %u\n", i);
     checkCudaErrors(cudaGetLastError());
-    compact(d_inputVals, d_inputPos, numElems, mask, 0, 0,        out_zero, out_zero_values, &num_zero);
-    compact(d_inputVals, d_inputPos, numElems, mask, 1, num_zero, out_ones, out_ones_values, &num_ones);
+    compact(d_inputVals, d_inputPos, numElems, mask, 0, 0,        &out_zero, &out_zero_values, &num_zero);
+    compact(d_inputVals, d_inputPos, numElems, mask, 1, num_zero-1, &out_ones, &out_ones_values, &num_ones);
     // merge
-    cudaMemcpy(d_inputVals,              *out_zero,        num_zero, cudaMemcpyDeviceToDevice);
-    cudaMemcpy(d_inputPos,               *out_zero_values, num_zero, cudaMemcpyDeviceToDevice);
-    cudaMemcpy(&(d_inputVals[num_zero]), *out_ones,        num_ones, cudaMemcpyDeviceToDevice);
-    cudaMemcpy(&(d_inputPos[num_zero]),  *out_ones_values, num_ones, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(d_inputVals,              out_zero,        num_zero, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(d_inputPos,               out_zero_values, num_zero, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(&(d_inputVals[num_zero]), out_ones,        num_ones, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(&(d_inputPos[num_zero]),  out_ones_values, num_ones, cudaMemcpyDeviceToDevice);
     // scatter
-    scatter<<<numElems/1024, 1024>>>(d_inputVals, d_inputPos, d_outputVals, d_outputPos, numElems);
+//    scatter<<<numElems/1024, 1024>>>(d_inputVals, d_inputPos, d_outputVals, d_outputPos, numElems);
 
     swap_arrays(&d_inputVals, &d_outputVals);
     swap_arrays(&d_inputPos,  &d_outputPos);
